@@ -419,7 +419,7 @@ def upload_file(
             f"<h3>Error Processing Document:</h3> Standard structural misalignment. Please ensure headers look exact. Trace: {e}"
         )
 
-       df.columns = [str(col).strip() for col in df.columns]
+    df.columns = [str(col).strip() for col in df.columns]
     df = standardize_columns(df, engine_mode)
 
     required_cols = {
@@ -436,117 +436,117 @@ def upload_file(
     try:
         # --- BRANCH A: RETAIL PROCESSOR ---
         if engine_mode == "retail":
-        df["Units"] = clean_numeric_column(df["Units"])
-        df["Revenue"] = clean_numeric_column(df["Revenue"])
-        df["Price"] = clean_numeric_column(df["Price"])
-        df["Product"] = df["Product"].astype(str).str.strip()
+            df["Units"] = clean_numeric_column(df["Units"])
+            df["Revenue"] = clean_numeric_column(df["Revenue"])
+            df["Price"] = clean_numeric_column(df["Price"])
+            df["Product"] = df["Product"].astype(str).str.strip()
 
-        total_rows = len(df)
-        total_rev = int(df["Revenue"].sum())
-        avg_val = total_rev / total_rows if total_rows > 0 else 0
+            total_rows = len(df)
+            total_rev = int(df["Revenue"].sum())
+            avg_val = total_rev / total_rows if total_rows > 0 else 0
 
-        product_totals = (
-            df.groupby("Product")
-            .agg({"Units": "sum", "Revenue": "sum", "Price": "max"})
-            .reset_index()
-        )
-        top_vol_prod = product_totals.loc[
-            product_totals["Units"].idxmax(), "Product"
-        ]
-        top_rev_prod = product_totals.loc[
-            product_totals["Revenue"].idxmax(), "Product"
-        ]
-        max_retail_price = int(product_totals["Price"].max())
+            product_totals = (
+                df.groupby("Product")
+                .agg({"Units": "sum", "Revenue": "sum", "Price": "max"})
+                .reset_index()
+            )
+            top_vol_prod = product_totals.loc[
+                product_totals["Units"].idxmax(), "Product"
+            ]
+            top_rev_prod = product_totals.loc[
+                product_totals["Revenue"].idxmax(), "Product"
+            ]
+            max_retail_price = int(product_totals["Price"].max())
 
-        profit_est = 0
-        total_wholesale_cost = 0
-        for idx, row in product_totals.iterrows():
-            if row["Price"] > 500:
-                profit_est += int(row["Revenue"] * 0.25)
-                total_wholesale_cost += int(row["Revenue"] * 0.75)
-            else:
-                profit_est += int(row["Revenue"] * 0.45)
-                total_wholesale_cost += int(row["Revenue"] * 0.55)
+            profit_est = 0
+            total_wholesale_cost = 0
+            for idx, row in product_totals.iterrows():
+                if row["Price"] > 500:
+                    profit_est += int(row["Revenue"] * 0.25)
+                    total_wholesale_cost += int(row["Revenue"] * 0.75)
+                else:
+                    profit_est += int(row["Revenue"] * 0.45)
+                    total_wholesale_cost += int(row["Revenue"] * 0.55)
 
-        runway_required = int(total_wholesale_cost * 1.1)
-        mean_units = product_totals["Units"].mean()
-        optimization_insights = []
+            runway_required = int(total_wholesale_cost * 1.1)
+            mean_units = product_totals["Units"].mean()
+            optimization_insights = []
 
-        for idx, row in product_totals.iterrows():
-            if row["Units"] > mean_units:
-                potential_lift = int(row["Revenue"] * 0.05)
+            for idx, row in product_totals.iterrows():
+                if row["Units"] > mean_units:
+                    potential_lift = int(row["Revenue"] * 0.05)
+                    optimization_insights.append(
+                        f"<strong>Smart Price Optimizer:</strong> Outstanding sales velocity flagged on <code>{row['Product']}</code>. "
+                        f"Bumping price tiers by a soft 5% unlocks an estimated extra <strong>${potential_lift:,}</strong> in pure net profit margins."
+                    )
+            if not optimization_insights:
                 optimization_insights.append(
-                    f"<strong>Smart Price Optimizer:</strong> Outstanding sales velocity flagged on <code>{row['Product']}</code>. "
-                    f"Bumping price tiers by a soft 5% unlocks an estimated extra <strong>${potential_lift:,}</strong> in pure net profit margins."
+                    "Smart Price Optimizer: Velocity trends stable. Current product price margins are optimally aligned."
                 )
-        if not optimization_insights:
-            optimization_insights.append(
-                "Smart Price Optimizer: Velocity trends stable. Current product price margins are optimally aligned."
+
+            product_totals = product_totals.sort_values(
+                by="Revenue", ascending=False
             )
 
-        product_totals = product_totals.sort_values(
-            by="Revenue", ascending=False
-        )
+            STORAGE[session_id] = {
+                "engine": "retail",
+                "filename": file.filename,
+                "total_rows": total_rows,
+                "total_revenue": f"${total_rev:,}",
+                "avg_val": avg_val,
+                "top_vol_prod": top_vol_prod,
+                "top_rev_prod": top_rev_prod,
+                "max_price": max_retail_price,
+                "profit_est": f"${profit_est:,}",
+                "raw_profit_est": profit_est,
+                "raw_wholesale_cost": total_wholesale_cost,
+                "runway_required": f"${runway_required:,}",
+                "price_strategy": optimization_insights[0],
+                "chart_labels": json.dumps(product_totals["Product"].tolist()),
+                "chart_data": json.dumps(product_totals["Revenue"].tolist()),
+            }
 
-        STORAGE[session_id] = {
-            "engine": "retail",
-            "filename": file.filename,
-            "total_rows": total_rows,
-            "total_revenue": f"${total_rev:,}",
-            "avg_val": avg_val,
-            "top_vol_prod": top_vol_prod,
-            "top_rev_prod": top_rev_prod,
-            "max_price": max_retail_price,
-            "profit_est": f"${profit_est:,}",
-            "raw_profit_est": profit_est,
-            "raw_wholesale_cost": total_wholesale_cost,
-            "runway_required": f"${runway_required:,}",
-            "price_strategy": optimization_insights[0],
-            "chart_labels": json.dumps(product_totals["Product"].tolist()),
-            "chart_data": json.dumps(product_totals["Revenue"].tolist()),
-        }
+        # --- BRANCH B: SERVICE PROCESSOR ---
+        else:
+            df["Price"] = clean_numeric_column(df["Price"])
+            df["Duration_Mins"] = clean_numeric_column(df["Duration_Mins"])
+            df["Material_Cost"] = clean_numeric_column(df["Material_Cost"])
+            df["Service_Type"] = df["Service_Type"].astype(str).str.strip()
+            df["Staff_Member"] = df["Staff_Member"].astype(str).str.strip()
 
-    # --- BRANCH B: SERVICE PROCESSOR ---
-    else:
-        df["Price"] = clean_numeric_column(df["Price"])
-        df["Duration_Mins"] = clean_numeric_column(df["Duration_Mins"])
-        df["Material_Cost"] = clean_numeric_column(df["Material_Cost"])
-        df["Service_Type"] = df["Service_Type"].astype(str).str.strip()
-        df["Staff_Member"] = df["Staff_Member"].astype(str).str.strip()
+            total_bookings = len(df)
+            gross_service_rev = int(df["Price"].sum())
 
-        total_bookings = len(df)
-        gross_service_rev = int(df["Price"].sum())
+            service_totals = (
+                df.groupby("Service_Type").agg({"Price": "sum"}).reset_index()
+            )
+            service_totals = service_totals.sort_values(
+                by="Price", ascending=False
+            )
 
-        service_totals = (
-            df.groupby("Service_Type").agg({"Price": "sum"}).reset_index()
-        )
-        service_totals = service_totals.sort_values(
-            by="Price", ascending=False
-        )
+            STORAGE[session_id] = {
+                "engine": "service",
+                "filename": file.filename,
+                "total_rows": total_bookings,
+                "total_revenue": f"${gross_service_rev:,}",
+                "chart_labels": json.dumps(service_totals["Service_Type"].tolist()),
+                "chart_data": json.dumps(service_totals["Price"].tolist()),
+                "capacity_score": "82%",
+                "labor_score": "Alex (Premium Producer)",
+                "retention_score": "24 Days Average",
+                "noshow_score": "4.2%",
+                "ticket_efficiency": "$1.45 / Minute",
+                "chair_density": "$65.00 / Hr / Chair",
+                "net_margins": f"${int(gross_service_rev * 0.65):,}",
+                "staffing_runway": "4 Members Recommended",
+                "ltv_tier": "Top 12 Clients Flagged",
+                "bundle_synergy": "Haircut + Beard Trim (68% Linkage)",
+            }
 
-        STORAGE[session_id] = {
-            "engine": "service",
-            "filename": file.filename,
-            "total_rows": total_bookings,
-            "total_revenue": f"${gross_service_rev:,}",
-            "chart_labels": json.dumps(service_totals["Service_Type"].tolist()),
-            "chart_data": json.dumps(service_totals["Price"].tolist()),
-            "capacity_score": "82%",
-            "labor_score": "Alex (Premium Producer)",
-            "retention_score": "24 Days Average",
-            "noshow_score": "4.2%",
-            "ticket_efficiency": "$1.45 / Minute",
-            "chair_density": "$65.00 / Hr / Chair",
-            "net_margins": f"${int(gross_service_rev * 0.65):,}",
-            "staffing_runway": "4 Members Recommended",
-            "ltv_tier": "Top 12 Clients Flagged",
-            "bundle_synergy": "Haircut + Beard Trim (68% Linkage)",
-        }
-
-        except Exception as e:
-            return HTMLResponse(
-                f"<h3>Error Processing Document:</h3> Something went wrong while calculating your metrics. "
-                f"Trace: {e}"
+    except Exception as e:
+        return HTMLResponse(
+            f"<h3>Error Processing Document:</h3> Something went wrong while calculating your metrics. "
+            f"Trace: {e}"
         )
 
     resp = RedirectResponse(url="/", status_code=303)
