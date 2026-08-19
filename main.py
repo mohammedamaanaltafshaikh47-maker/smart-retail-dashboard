@@ -544,9 +544,9 @@ def upload_file(
         }
 
         except Exception as e:
-        return HTMLResponse(
-            f"<h3>Error Processing Document:</h3> Something went wrong while calculating your metrics. "
-            f"Trace: {e}"
+            return HTMLResponse(
+                f"<h3>Error Processing Document:</h3> Something went wrong while calculating your metrics. "
+                f"Trace: {e}"
         )
 
     resp = RedirectResponse(url="/", status_code=303)
