@@ -330,6 +330,35 @@ def clean_numeric_column(series: pd.Series) -> pd.Series:
     )
     return pd.to_numeric(cleaned, errors="coerce").fillna(0)
 
+def standardize_columns(df: pd.DataFrame, engine_mode: str) -> pd.DataFrame:
+    """Renames common column-name variations to the exact names the app expects,
+    so uploads don't crash just because someone named a column differently."""
+    aliases = {
+        "retail": {
+            "Revenue": ["revenue", "sales", "amount", "total sales", "total"],
+            "Units":   ["units", "qty", "quantity", "units sold", "qty sold"],
+            "Price":   ["price", "unit price", "rate"],
+            "Product": ["product", "product name", "item", "item name"],
+        },
+        "service": {
+            "Price":         ["price", "amount", "fee", "cost"],
+            "Duration_Mins": ["duration_mins", "duration", "minutes", "time (mins)"],
+            "Material_Cost": ["material_cost", "materials", "supply cost"],
+            "Service_Type":  ["service_type", "service", "treatment"],
+            "Staff_Member":  ["staff_member", "staff", "employee", "provider"],
+        },
+    }
+    needed = aliases.get(engine_mode, {})
+    for target_col, possible_names in needed.items():
+        if target_col not in df.columns:
+            for col in df.columns:
+                if col.strip().lower() in possible_names:
+                    df = df.rename(columns={col: target_col})
+                    print(f"[Monex Engine] Remapped column '{col}' -> '{target_col}'")
+                    break
+    return df
+    
+
 
 # --- ROUTE 1 ENDPOINT ---
 @app.get("/", response_class=HTMLResponse)
@@ -390,10 +419,23 @@ def upload_file(
             f"<h3>Error Processing Document:</h3> Standard structural misalignment. Please ensure headers look exact. Trace: {e}"
         )
 
-    df.columns = [str(col).strip() for col in df.columns]
+       df.columns = [str(col).strip() for col in df.columns]
+    df = standardize_columns(df, engine_mode)
 
-    # --- BRANCH A: RETAIL PROCESSOR ---
-    if engine_mode == "retail":
+    required_cols = {
+        "retail": ["Units", "Revenue", "Price", "Product"],
+        "service": ["Price", "Duration_Mins", "Material_Cost", "Service_Type", "Staff_Member"],
+    }[engine_mode]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        return HTMLResponse(
+            f"<h3>Error Processing Document:</h3> Your file is missing required column(s): "
+            f"<strong>{', '.join(missing)}</strong>. Found columns: {list(df.columns)}."
+        )
+
+    try:
+        # --- BRANCH A: RETAIL PROCESSOR ---
+        if engine_mode == "retail":
         df["Units"] = clean_numeric_column(df["Units"])
         df["Revenue"] = clean_numeric_column(df["Revenue"])
         df["Price"] = clean_numeric_column(df["Price"])
@@ -500,6 +542,12 @@ def upload_file(
             "ltv_tier": "Top 12 Clients Flagged",
             "bundle_synergy": "Haircut + Beard Trim (68% Linkage)",
         }
+
+        except Exception as e:
+        return HTMLResponse(
+            f"<h3>Error Processing Document:</h3> Something went wrong while calculating your metrics. "
+            f"Trace: {e}"
+        )
 
     resp = RedirectResponse(url="/", status_code=303)
     if is_new:
