@@ -90,6 +90,16 @@ def generate_home_html(metrics: dict = None):
     stats_btn_url = "/top-stats" if metrics else "#"
     stats_btn_disabled = "" if metrics else "disabled"
 
+    derived_banner_html = ""
+    if metrics and metrics.get("derivation_notes"):
+        notes_html = "".join(f"<li>{note}</li>" for note in metrics["derivation_notes"])
+        derived_banner_html = f"""
+        <div class="p-3 rounded-3 mb-3" style="background: rgba(0, 255, 135, 0.06); border: 1px solid rgba(0, 255, 135, 0.2);">
+            <span style="color: #00ff87; font-size: 0.85rem;">🧮 <strong>Auto-calculated:</strong></span>
+            <ul class="mb-0 mt-1 small" style="color: rgba(255,255,255,0.75);">{notes_html}</ul>
+        </div>
+        """
+
     if metrics is None:
         insights_html = """
         <div class="text-center py-5">
@@ -285,6 +295,7 @@ def generate_home_html(metrics: dict = None):
                         <div class="glass-card p-4 mb-5">
                             <h5 class="text-white fw-bold mb-4">📊 Operational Intelligence Panel</h5>
                             <hr style="border-color: rgba(255,255,255,0.08);">
+                            {derived_banner_html}
                             {insights_html}
                         </div>
                     </div>
@@ -330,34 +341,63 @@ def clean_numeric_column(series: pd.Series) -> pd.Series:
     )
     return pd.to_numeric(cleaned, errors="coerce").fillna(0)
 
+def _normalize_col_name(name: str) -> str:
+    """Lowercases and strips spaces/underscores/punctuation so 'Unit Price',
+    'unit_price', and 'UnitPrice' all normalize to the same 'unitprice' key."""
+    return "".join(ch for ch in str(name).strip().lower() if ch.isalnum())
+
+
 def standardize_columns(df: pd.DataFrame, engine_mode: str) -> pd.DataFrame:
     """Renames common column-name variations to the exact names the app expects,
-    so uploads don't crash just because someone named a column differently."""
+    so uploads don't crash just because someone named a column differently.
+    Matching ignores case, spaces, and underscores (e.g. 'Unit Price' ==
+    'UnitPrice' == 'unit_price'), and only ever maps to a KNOWN, exact alias --
+    it never guesses or fuzzy-matches, so there's no risk of mapping the wrong
+    column by mistake."""
     aliases = {
         "retail": {
-            "Revenue": ["revenue", "sales", "amount", "total sales", "total"],
-            "Units":   ["units", "qty", "quantity", "units sold", "qty sold"],
-            "Price":   ["price", "unit price", "rate"],
-            "Product": ["product", "product name", "item", "item name"],
+            "Revenue": ["revenue", "sales", "amount", "totalsales", "total", "totalrevenue", "grosssales"],
+            "Units":   ["units", "qty", "quantity", "unitssold", "qtysold", "noofunits"],
+            "Price":   ["price", "unitprice", "rate", "costperitem", "pricepeunit", "perunitprice"],
+            "Product": ["product", "productname", "item", "itemname", "sku"],
         },
         "service": {
             "Price":         ["price", "amount", "fee", "cost"],
-            "Duration_Mins": ["duration_mins", "duration", "minutes", "time (mins)"],
-            "Material_Cost": ["material_cost", "materials", "supply cost"],
-            "Service_Type":  ["service_type", "service", "treatment"],
-            "Staff_Member":  ["staff_member", "staff", "employee", "provider"],
+            "Duration_Mins": ["durationmins", "duration", "minutes", "timemins"],
+            "Material_Cost": ["materialcost", "materials", "supplycost"],
+            "Service_Type":  ["servicetype", "service", "treatment"],
+            "Staff_Member":  ["staffmember", "staff", "employee", "provider"],
         },
     }
     needed = aliases.get(engine_mode, {})
+    normalized_lookup = {_normalize_col_name(col): col for col in df.columns}
     for target_col, possible_names in needed.items():
         if target_col not in df.columns:
-            for col in df.columns:
-                if col.strip().lower() in possible_names:
-                    df = df.rename(columns={col: target_col})
-                    print(f"[Monex Engine] Remapped column '{col}' -> '{target_col}'")
+            for possible_name in possible_names:
+                if possible_name in normalized_lookup:
+                    original_col = normalized_lookup[possible_name]
+                    df = df.rename(columns={original_col: target_col})
+                    print(f"[Monex Engine] Remapped column '{original_col}' -> '{target_col}'")
                     break
     return df
-    
+
+
+def derive_missing_columns(df: pd.DataFrame, engine_mode: str) -> tuple[pd.DataFrame, list]:
+    """If Revenue is still missing after alias-mapping, but we have both Units
+    and Price, calculate Revenue = Units * Price. This is plain arithmetic
+    (not a guess), so it's always exactly correct -- same as typing =C2*D2 in
+    Excel. Returns (df, notes) where notes lists what was auto-calculated, so
+    the UI can show the user what happened."""
+    notes = []
+    if engine_mode == "retail":
+        if "Revenue" not in df.columns and "Units" in df.columns and "Price" in df.columns:
+            df["Units"] = clean_numeric_column(df["Units"])
+            df["Price"] = clean_numeric_column(df["Price"])
+            df["Revenue"] = df["Units"] * df["Price"]
+            notes.append("Revenue was calculated automatically as Quantity \u00d7 Unit Price.")
+    return df, notes
+
+
 
 
 # --- ROUTE 1 ENDPOINT ---
@@ -421,6 +461,7 @@ def upload_file(
 
     df.columns = [str(col).strip() for col in df.columns]
     df = standardize_columns(df, engine_mode)
+    df, derivation_notes = derive_missing_columns(df, engine_mode)
 
     required_cols = {
         "retail": ["Units", "Revenue", "Price", "Product"],
@@ -504,6 +545,7 @@ def upload_file(
                 "price_strategy": optimization_insights[0],
                 "chart_labels": json.dumps(product_totals["Product"].tolist()),
                 "chart_data": json.dumps(product_totals["Revenue"].tolist()),
+                "derivation_notes": derivation_notes,
             }
 
         # --- BRANCH B: SERVICE PROCESSOR ---
@@ -602,10 +644,11 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <hr style="border-color: rgba(255,255,255,0.08);">
                                 <h3 class="fw-bold text-white m-0" style="letter-spacing: -0.5px;">${metrics['avg_val']:.2f}</h3>
-                                <p class="small mt-2 mb-0" style="color: rgba(255, 255, 255, 0.5);">Mean capital velocity per data row.</p>
+                                <p class="small mt-2 mb-0" style="color: rgba(255, 255, 255, 0.5);">Average amount per sale.</p>
                                 <div id="atvDrawer" class="info-drawer mt-3">
                                     <div class="p-3 text-info small" style="line-height:1.5;">
-                                        <strong>What this means:</strong> Average collection value parsed against single transactional items inside rows.
+                                        <strong>What this means:</strong> On average, each sale in your file was worth ${metrics['avg_val']:.2f}. We got this by adding up all your revenue and dividing by the number of rows in your file. <br><br>
+                                        <strong>Example:</strong> If you sold 3 items for $100, $200, and $300, the average would be $200.
                                     </div>
                                 </div>
                             </div>
@@ -619,10 +662,11 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <hr style="border-color: rgba(255,255,255,0.08);">
                                 <h3 class="fw-bold m-0" style="color: #00ff87; letter-spacing: -0.5px;">{metrics['profit_est']}</h3>
-                                <p class="small mt-2 mb-0" style="color: rgba(255, 255, 255, 0.5);">Calculated take-home enterprise margin yield.</p>
+                                <p class="small mt-2 mb-0" style="color: rgba(255, 255, 255, 0.5);">Rough estimate of what you keep after costs.</p>
                                 <div id="profitDrawer" class="info-drawer mt-3">
                                     <div class="p-3 text-success small" style="line-height:1.5;">
-                                        <strong>Simple Math Breakdown:</strong> We process custom margin tiers against macro inventory pricing arrays.
+                                        <strong>What this means:</strong> This is our estimate of your take-home profit, after subtracting the cost of goods. <br><br>
+                                        <strong>Example:</strong> If a product sells for $500 or less, we assume the cost was 55% of the sale (so you keep 45% profit). If it sells for more than $500, we assume the cost was 75% (so you keep 25% profit) — higher-priced items usually have thinner margins.
                                     </div>
                                 </div>
                             </div>
@@ -651,23 +695,22 @@ def generate_top_stats_html(metrics: dict):
                     <div class="row mb-4">
                         <div class="col-md-6 mb-4">
                             <div class="glass-card p-4 h-100">
-                                <h6 class="text-uppercase small fw-bold tracking-wider mb-3" style="color: #00d2ff;">📊 Inventory Share Valuation</h6>
+                                <h6 class="text-uppercase small fw-bold tracking-wider mb-3" style="color: #00d2ff;">📊 Which Products Make the Most Money</h6>
                                 <canvas id="concentrationChart"></canvas>
                             </div>
                         </div>
                         <div class="col-md-6 mb-4">
                             <div class="glass-card p-4 h-100">
-                                <h6 class="text-uppercase small fw-bold tracking-wider mb-3" style="color: #00ff87;">💳 Strategic Capital Apportionment Breakdown</h6>
+                                <h6 class="text-uppercase small fw-bold tracking-wider mb-3" style="color: #00ff87;">💳 Cost vs. Profit</h6>
                                 <canvas id="costProfitChart"></canvas>
                                 
                                 <div class="mt-4 p-3 rounded-3" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.06); font-size: 0.85rem; line-height: 1.5;">
-                                    <span style="color: #00ff87;">💡 <strong>What is this chart & How to use it:</strong></span>
+                                    <span style="color: #00ff87;">💡 <strong>What is this chart?</strong></span>
                                     <p class="mt-2 text-white-50 mb-0">
-                                        This visualization tracks your <strong>Asset Capitalization Ratio</strong>. It splits your total revenue pool into two critical segments: 
-                                        the baseline cost needed to re-purchase wholesale goods (gray) versus your unencumbered take-home profit (green).
+                                        This bar splits your total sales into two parts: what it cost you to get the goods (gray), and what you actually keep as profit (green).
                                     </p>
                                     <p class="mt-2 text-white-50 mb-0">
-                                        <strong>Operational Playbook:</strong> Use this breakdown to plan your financial runway. If the gray wholesale block dominates your chart, look into bulk supplier discounts or consider adjusting retail margins to widen your take-home green zone.
+                                        <strong>What to do with this:</strong> If the gray part is much bigger than the green part, your costs are eating into your profit — look for cheaper suppliers or consider raising prices slightly on your best-selling items.
                                     </p>
                                 </div>
                             </div>
@@ -770,8 +813,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0">{metrics['capacity_score']}</h3>
                                 <div id="drawer1" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Total time slots filled versus unallocated operating hours.<br>
-                                    <strong>Advice:</strong> Empty chairs cost rent. If score falls under 80%, instantly spin up weekday micro-promotions or off-peak happy hours to rescue evaporating margins.
+                                    <strong>What this means:</strong> Out of all your available appointment slots, how many were actually booked.<br>
+                                    <strong>What to do:</strong> An empty chair still costs you rent. If this is under 80%, try weekday discounts or off-peak offers to fill more slots.
                                 </div></div>
                             </div>
                         </div>
@@ -784,8 +827,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0" style="font-size:1.35rem; line-height: 1.5;">{metrics['labor_score']}</h3>
                                 <div id="drawer2" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Ranks your service providers by raw volume generation and client request weights.<br>
-                                    <strong>Advice:</strong> Shift low-performing team profiles to shadow your premium producers to balance output without increasing administrative costs.
+                                    <strong>What this means:</strong> Your top-performing staff member, based on how much revenue they've brought in and how often clients request them.<br>
+                                    <strong>What to do:</strong> Have newer or lower-performing staff shadow this person to learn their approach — no extra hiring needed.
                                 </div></div>
                             </div>
                         </div>
@@ -798,8 +841,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0">{metrics['retention_score']}</h3>
                                 <div id="drawer3" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> The mean time-span gap before a customer re-books an appointment asset.<br>
-                                    <strong>Advice:</strong> If return frequency lengthens by 5+ days, setup automated WhatsApp/SMS checkout booking reminders to hook clients before they drift to competitors.
+                                    <strong>What this means:</strong> On average, how many days pass before a customer comes back for another appointment.<br>
+                                    <strong>What to do:</strong> If this number starts creeping up, send a WhatsApp/SMS reminder to customers before they drift to a competitor.
                                 </div></div>
                             </div>
                         </div>
@@ -814,8 +857,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0">{metrics['noshow_score']}</h3>
                                 <div id="drawer4" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Percentage of revenue leaking out due to unfulfilled, missed, or late-canceled appointments.<br>
-                                    <strong>Advice:</strong> For high-risk weekend blocks, implement a 20% pre-payment micro-deposit requirement at checkout to guarantee client accountability.
+                                    <strong>What this means:</strong> The percentage of your bookings where the customer didn't show up or canceled last-minute — that's lost revenue.<br>
+                                    <strong>What to do:</strong> For busy weekend slots, consider asking for a small 20% deposit upfront to reduce no-shows.
                                 </div></div>
                             </div>
                         </div>
@@ -828,8 +871,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0">{metrics['ticket_efficiency']}</h3>
                                 <div id="drawer5" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Calculates the raw currency yield generated per active minute of manual labor.<br>
-                                    <strong>Advice:</strong> Isolate treatments that hold high capital speed. Train front-desk receptionists to prioritize scheduling short, fast, premium-margin items.
+                                    <strong>What this means:</strong> How much money you make for every minute a staff member spends with a customer.<br>
+                                    <strong>What to do:</strong> Find your fastest, highest-paying services, and have front-desk staff prioritize booking those when the schedule is tight.
                                 </div></div>
                             </div>
                         </div>
@@ -842,8 +885,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0" style="font-size:1.25rem; line-height:1.6;">{metrics['chair_density']}</h3>
                                 <div id="drawer6" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Total venue capital generated divided by physical working stations or treatment rooms.<br>
-                                    <strong>Advice:</strong> If certain rooms sit stagnant, reconfigure floor layouts, update lightning vectors, or balance specialized equipment tools across empty tables.
+                                    <strong>What this means:</strong> How much revenue each chair or treatment room brings in, per hour it's in use.<br>
+                                    <strong>What to do:</strong> If some chairs/rooms are sitting empty a lot, consider rearranging your layout so busier staff get the higher-traffic spots.
                                 </div></div>
                             </div>
                         </div>
@@ -858,8 +901,8 @@ def generate_top_stats_html(metrics: dict):
                                 </div>
                                 <h3 class="fw-bold text-white m-0" style="font-size:1.3rem; line-height:1.5;">{metrics['bundle_synergy']}</h3>
                                 <div id="drawer10" class="info-drawer"><div class="p-3 mt-2 border-top border-secondary-subtle small text-white-50">
-                                    <strong>Concept:</strong> Identifies high-affinity matching pairs frequently checked out simultaneously by clients.<br>
-                                    <strong>Advice:</strong> Print physical service scripts or prompt front-desk clerks to say: "Would you like to attach a product kit with your treatment today?" to increase ticket sizes organically.
+                                    <strong>What this means:</strong> The two services customers most often book together in the same visit.<br>
+                                    <strong>What to do:</strong> Train staff to suggest this combo to other customers too — e.g. "Would you like to add on X with your Y today?"
                                 </div></div>
                             </div>
                         </div>
